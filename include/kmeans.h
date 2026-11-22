@@ -20,6 +20,7 @@ struct KMeansResult {
     double inertia = 0.0;          // Sum of squared point-to-centroid distances.
     double elapsed_seconds = 0.0;
     bool converged = false;
+    int threads_used = 1;          // Actual OpenMP team size in the MPI version.
 };
 
 std::vector<double> initialize_kmeans_plus_plus(const Dataset& data,

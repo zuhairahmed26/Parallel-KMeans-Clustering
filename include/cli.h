@@ -9,6 +9,8 @@
 struct CommandLineOptions {
     std::size_t points = 10000;
     std::size_t dimensions = 2;
+    // Zero means: use the OpenMP runtime setting (for example OMP_NUM_THREADS).
+    std::size_t threads = 0;
     KMeansOptions kmeans;
     double standard_deviation = 1.0;
 };

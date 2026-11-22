@@ -20,6 +20,7 @@ option(BUILD_MPI "Build the distributed-memory MPI implementation" ON)
 if(BUILD_MPI)
     find_package(MPI QUIET COMPONENTS CXX)
     if(MPI_CXX_FOUND)
+        find_package(OpenMP REQUIRED COMPONENTS CXX)
         add_executable(kmeans_mpi
             src/main_mpi.cpp
             src/cli.cpp
@@ -28,7 +29,7 @@ if(BUILD_MPI)
             src/kmeans_mpi.cpp
         )
         target_include_directories(kmeans_mpi PRIVATE include)
-        target_link_libraries(kmeans_mpi PRIVATE MPI::MPI_CXX)
+        target_link_libraries(kmeans_mpi PRIVATE MPI::MPI_CXX OpenMP::OpenMP_CXX)
     else()
         message(WARNING "MPI C++ not found; kmeans_mpi will not be built. The serial kmeans target is still available.")
     endif()

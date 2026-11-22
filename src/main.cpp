@@ -15,6 +15,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (help) { print_usage(argv[0]); return 0; }
+    if (cli.threads != 0) {
+        std::cerr << "Error: --threads applies to kmeans_mpi; the serial executable uses one thread.\n";
+        return 2;
+    }
 
     try {
         const Dataset data = generate_gaussian_blobs(cli.points, cli.dimensions,

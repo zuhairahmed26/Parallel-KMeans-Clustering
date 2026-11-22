@@ -10,4 +10,5 @@ KMeansResult run_mpi_kmeans(const Dataset& root_data,
                             const KMeansOptions& options,
                             int rank,
                             int world_size,
+                            int thread_count,
                             MPI_Comm communicator = MPI_COMM_WORLD);

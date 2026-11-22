@@ -2,6 +2,8 @@
 #include "dataset.h"
 #include "kmeans_mpi.h"
 
+#include <omp.h>
+
 #include <exception>
 #include <algorithm>
 #include <iomanip>
@@ -15,9 +17,15 @@ namespace {
 class MpiSession {
 public:
     MpiSession(int& argc, char**& argv) {
-        const int status = MPI_Init(&argc, &argv);
+        int provided = MPI_THREAD_SINGLE;
+        const int status = MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
         if (status != MPI_SUCCESS) throw std::runtime_error("MPI_Init failed");
         active_ = true;
+        if (provided < MPI_THREAD_FUNNELED) {
+            MPI_Finalize();
+            active_ = false;
+            throw std::runtime_error("MPI does not provide the required MPI_THREAD_FUNNELED level");
+        }
         MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN);
     }
     ~MpiSession() { if (active_) MPI_Finalize(); }
@@ -65,6 +73,15 @@ int main(int argc, char** argv) {
             return 2;
         }
 
+        // CLI overrides OMP_NUM_THREADS. Without --threads, use the OpenMP
+        // runtime's environment/default value. Disable dynamic shrinking so
+        // the requested team size can be observed and reproduced.
+        omp_set_dynamic(0);
+        const int thread_count = cli.threads == 0
+            ? omp_get_max_threads()
+            : static_cast<int>(cli.threads);
+        omp_set_num_threads(thread_count);
+
         Dataset root_data;
         int generation_ok = 1;
         std::string generation_error;
@@ -83,12 +100,12 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        const KMeansResult result = run_mpi_kmeans(root_data, cli.kmeans, rank, world_size);
+        const KMeansResult result = run_mpi_kmeans(root_data, cli.kmeans, rank, world_size, thread_count);
         if (rank == 0) {
             std::cout << std::fixed << std::setprecision(12)
                       << "Mode: MPI (serial assignment per rank)\nPoints: " << cli.points
                       << "\nDimensions: " << cli.dimensions << "\nClusters: " << cli.kmeans.clusters
-                      << "\nMPI ranks: " << world_size << "\nOpenMP threads per rank: 1"
+                      << "\nMPI ranks: " << world_size << "\nOpenMP threads per rank: " << result.threads_used
                       << "\nIterations: " << result.iterations
                       << "\nConverged: " << (result.converged ? "yes" : "no")
                       << "\nRuntime (seconds): " << result.elapsed_seconds

@@ -34,6 +34,11 @@ bool parse_command_line(int argc, char** argv, CommandLineOptions& options,
             const char* value = argv[++i];
             if (arg == "--points") options.points = parse_size(value, "points");
             else if (arg == "--dimensions") options.dimensions = parse_size(value, "dimensions");
+            else if (arg == "--threads") {
+                options.threads = parse_size(value, "threads");
+                if (options.threads > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                    throw std::invalid_argument("threads exceeds the supported OpenMP thread count");
+            }
             else if (arg == "--clusters") options.kmeans.clusters = parse_size(value, "clusters");
             else if (arg == "--max-iterations") options.kmeans.max_iterations = parse_size(value, "max iterations");
             else if (arg == "--seed") options.kmeans.seed = std::stoull(value);
@@ -54,6 +59,7 @@ void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [options]\n"
               << "  --points N           Number of synthetic points (default 10000)\n"
               << "  --dimensions D       Coordinates per point (default 2)\n"
+              << "  --threads N          OpenMP threads per MPI rank (MPI executable only)\n"
               << "  --clusters K         Number of clusters (default 3)\n"
               << "  --max-iterations N   Iteration limit (default 100)\n"
               << "  --tolerance X        Centroid movement threshold (default 0.0001)\n"

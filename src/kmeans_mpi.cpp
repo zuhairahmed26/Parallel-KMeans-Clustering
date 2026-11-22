@@ -1,5 +1,7 @@
 #include "kmeans_mpi.h"
 
+#include <omp.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -29,9 +31,12 @@ KMeansResult run_mpi_kmeans(const Dataset& root_data,
                             const KMeansOptions& options,
                             int rank,
                             int world_size,
+                            int thread_count,
                             MPI_Comm communicator) {
     if (world_size <= 0 || rank < 0 || rank >= world_size)
         throw std::invalid_argument("invalid MPI rank or world size");
+    if (thread_count <= 0)
+        throw std::invalid_argument("OpenMP thread count must be positive");
 
     // The command line is parsed on every rank, so dimensions and K are known
     // consistently without an extra metadata broadcast.
@@ -100,6 +105,13 @@ KMeansResult run_mpi_kmeans(const Dataset& root_data,
     std::vector<double> global_sums(centroid_value_count);
     std::vector<unsigned long long> local_counts(options.clusters);
     std::vector<unsigned long long> global_counts(options.clusters);
+    if (static_cast<std::size_t>(thread_count) >
+        std::numeric_limits<std::size_t>::max() / centroid_value_count)
+        throw std::invalid_argument("thread-local accumulator size overflows addressable memory");
+    const std::size_t thread_sum_size = static_cast<std::size_t>(thread_count) * centroid_value_count;
+    const std::size_t thread_count_size = static_cast<std::size_t>(thread_count) * options.clusters;
+    std::vector<double> thread_sums(thread_sum_size);
+    std::vector<unsigned long long> thread_counts(thread_count_size);
     KMeansResult result;
     result.centroids = centroids;
     result.assignments.resize(local_point_count, -1);
@@ -108,20 +120,49 @@ KMeansResult run_mpi_kmeans(const Dataset& root_data,
     for (std::size_t iteration = 0; iteration < options.max_iterations; ++iteration) {
         std::fill(local_sums.begin(), local_sums.end(), 0.0);
         std::fill(local_counts.begin(), local_counts.end(), 0ULL);
+        std::fill(thread_sums.begin(), thread_sums.end(), 0.0);
+        std::fill(thread_counts.begin(), thread_counts.end(), 0ULL);
+        int iteration_threads = 1;
 
-        // This loop is intentionally serial within each rank in Phase 3.
-        for (std::size_t i = 0; i < local_point_count; ++i) {
-            const double* point = local_points.data() + i * dims;
-            std::size_t best_cluster = 0;
-            double best_distance = std::numeric_limits<double>::infinity();
-            for (std::size_t cluster = 0; cluster < options.clusters; ++cluster) {
-                const double distance = squared_distance(point, centroids.data() + cluster * dims, dims);
-                if (distance < best_distance) { best_distance = distance; best_cluster = cluster; }
+        // Static scheduling gives each thread a contiguous, predictable share
+        // of equal-cost points. Each thread writes only to its own buffers.
+        #pragma omp parallel num_threads(thread_count)
+        {
+            const int thread_id = omp_get_thread_num();
+            double* sums = thread_sums.data() + static_cast<std::size_t>(thread_id) * centroid_value_count;
+            unsigned long long* counts = thread_counts.data() +
+                                         static_cast<std::size_t>(thread_id) * options.clusters;
+            #pragma omp single nowait
+            iteration_threads = omp_get_num_threads();
+
+            #pragma omp for schedule(static)
+            for (std::int64_t point_index = 0;
+                 point_index < static_cast<std::int64_t>(local_point_count); ++point_index) {
+                const std::size_t i = static_cast<std::size_t>(point_index);
+                const double* point = local_points.data() + i * dims;
+                std::size_t best_cluster = 0;
+                double best_distance = std::numeric_limits<double>::infinity();
+                for (std::size_t cluster = 0; cluster < options.clusters; ++cluster) {
+                    const double distance = squared_distance(point, centroids.data() + cluster * dims, dims);
+                    if (distance < best_distance) { best_distance = distance; best_cluster = cluster; }
+                }
+                result.assignments[i] = static_cast<int>(best_cluster);
+                ++counts[best_cluster];
+                for (std::size_t d = 0; d < dims; ++d)
+                    sums[best_cluster * dims + d] += point[d];
             }
-            result.assignments[i] = static_cast<int>(best_cluster);
-            ++local_counts[best_cluster];
-            for (std::size_t d = 0; d < dims; ++d)
-                local_sums[best_cluster * dims + d] += point[d];
+        }
+        result.threads_used = std::max(result.threads_used, iteration_threads);
+
+        // Merge each thread's private totals into this rank's totals only after
+        // the parallel region has joined. MPI then reduces rank totals globally.
+        for (int thread_id = 0; thread_id < iteration_threads; ++thread_id) {
+            const std::size_t sum_offset = static_cast<std::size_t>(thread_id) * centroid_value_count;
+            const std::size_t count_offset = static_cast<std::size_t>(thread_id) * options.clusters;
+            for (std::size_t i = 0; i < centroid_value_count; ++i)
+                local_sums[i] += thread_sums[sum_offset + i];
+            for (std::size_t cluster = 0; cluster < options.clusters; ++cluster)
+                local_counts[cluster] += thread_counts[count_offset + cluster];
         }
 
         // Allreduce sums each rank's partial sums/counts and gives the global
