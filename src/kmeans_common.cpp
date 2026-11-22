@@ -18,6 +18,10 @@ double squared_distance(const double* first, const double* second, std::size_t d
 std::vector<double> initialize_kmeans_plus_plus(const Dataset& data,
                                                 std::size_t clusters,
                                                 std::uint64_t seed) {
+    if (data.point_count == 0 || data.dimensions == 0 ||
+        data.point_count > std::numeric_limits<std::size_t>::max() / data.dimensions ||
+        data.values.size() != data.point_count * data.dimensions)
+        throw std::invalid_argument("dataset shape is invalid for K-Means++ initialization");
     if (clusters == 0 || clusters > data.point_count)
         throw std::invalid_argument("clusters must be in [1, points]");
 

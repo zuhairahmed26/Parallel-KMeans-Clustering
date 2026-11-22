@@ -1,6 +1,7 @@
 #include "cli.h"
 
 #include <cmath>
+#include <cerrno>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -8,11 +9,24 @@
 
 namespace {
 std::size_t parse_size(const char* text, const char* name) {
+    if (text[0] == '\0' || text[0] == '-')
+        throw std::invalid_argument(std::string(name) + " must be a positive integer");
     char* end = nullptr;
+    errno = 0;
     const unsigned long long value = std::strtoull(text, &end, 10);
-    if (text[0] == '\0' || *end != '\0' || value == 0 || value > std::numeric_limits<std::size_t>::max())
+    if (errno == ERANGE || *end != '\0' || value == 0 || value > std::numeric_limits<std::size_t>::max())
         throw std::invalid_argument(std::string(name) + " must be a positive integer");
     return static_cast<std::size_t>(value);
+}
+std::uint64_t parse_seed(const char* text) {
+    if (text[0] == '\0' || text[0] == '-')
+        throw std::invalid_argument("seed must be a non-negative integer");
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (errno == ERANGE || *end != '\0' || value > std::numeric_limits<std::uint64_t>::max())
+        throw std::invalid_argument("seed must be a non-negative integer in range");
+    return static_cast<std::uint64_t>(value);
 }
 double parse_double(const char* text, const char* name, bool allow_zero) {
     char* end = nullptr;
@@ -41,7 +55,7 @@ bool parse_command_line(int argc, char** argv, CommandLineOptions& options,
             }
             else if (arg == "--clusters") options.kmeans.clusters = parse_size(value, "clusters");
             else if (arg == "--max-iterations") options.kmeans.max_iterations = parse_size(value, "max iterations");
-            else if (arg == "--seed") options.kmeans.seed = std::stoull(value);
+            else if (arg == "--seed") options.kmeans.seed = parse_seed(value);
             else if (arg == "--tolerance") options.kmeans.tolerance = parse_double(value, "tolerance", true);
             else if (arg == "--stddev") options.standard_deviation = parse_double(value, "stddev", false);
             else throw std::invalid_argument("unknown option: " + arg);

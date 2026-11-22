@@ -104,6 +104,15 @@ MPI calls use `MPI_THREAD_FUNNELED`: MPI is called only by the main thread, whil
 
 The reported MPI runtime starts after initial centroids and point distribution. It includes iterative assignment/reduction work and final inertia, and reports the maximum elapsed rank time. Dataset generation and initial distribution are outside the timer, as they are outside the serial algorithm timer.
 
+## Final review scope and current limits
+
+- Dataset generation and K-Means++ initialization run on rank 0. The root temporarily holds the full synthetic dataset before `MPI_Scatterv` and its own local slice afterward.
+- MPI uses classic `int` element counts/displacements for `MPI_Scatterv`; configurations whose point or centroid element counts exceed `INT_MAX` are rejected before allocation/distribution.
+- Each rank's thread-private sum storage is proportional to `threads × clusters × dimensions`.
+- Assignments remain local to each rank in the normal CLI run; the program does not gather or write all labels. A correctness harness can gather them for comparisons.
+- The program currently reports runtime, iterations, MPI ranks and OpenMP threads per rank. Total worker count can be calculated as ranks × threads. Speedup, efficiency, CSV automation, plots and strong/weak scaling are intentionally deferred to Phase 6.
+- If a rank encounters an unexpected exception while MPI work is active, the program reports it and calls `MPI_Abort` so other ranks do not wait forever in a collective. Normal success and coordinated input-error paths finalize MPI normally.
+
 ## Troubleshooting
 
 - If CMake cannot find OpenMP, verify that the compiler's OpenMP runtime/development support is installed, then rerun CMake configuration.

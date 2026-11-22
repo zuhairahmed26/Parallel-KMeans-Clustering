@@ -1,6 +1,7 @@
 #include "dataset.h"
 
 #include <cmath>
+#include <limits>
 #include <random>
 #include <stdexcept>
 
@@ -15,10 +16,16 @@ Dataset generate_gaussian_blobs(std::size_t point_count,
         throw std::invalid_argument("standard deviation must be a positive finite number");
 
     Dataset data;
+    if (point_count > data.values.max_size() / dimensions ||
+        cluster_count > data.true_centers.max_size() / dimensions)
+        throw std::length_error("dataset dimensions exceed addressable vector storage");
+
     data.point_count = point_count;
     data.dimensions = dimensions;
-    data.values.resize(point_count * dimensions);
-    data.true_centers.resize(cluster_count * dimensions);
+    const std::size_t value_count = point_count * dimensions;
+    const std::size_t center_value_count = cluster_count * dimensions;
+    data.values.resize(value_count);
+    data.true_centers.resize(center_value_count);
 
     std::mt19937_64 random(seed);
     // Keep generated centers separated while remaining deterministic for a given seed.

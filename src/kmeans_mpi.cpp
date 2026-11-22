@@ -51,6 +51,9 @@ KMeansResult run_mpi_kmeans(const Dataset& root_data,
     const std::size_t dims = static_cast<std::size_t>(shape[1]);
     if (point_count == 0 || dims == 0 || options.clusters == 0 || options.clusters > point_count)
         throw std::invalid_argument("dataset dimensions and cluster count are invalid");
+    if (point_count > std::numeric_limits<std::size_t>::max() / dims ||
+        options.clusters > std::numeric_limits<std::size_t>::max() / dims)
+        throw std::invalid_argument("dataset or centroid shape overflows addressable memory");
     if (options.max_iterations == 0 || options.tolerance < 0.0 || !std::isfinite(options.tolerance))
         throw std::invalid_argument("maximum iterations must be positive and tolerance non-negative");
 
