@@ -3,6 +3,5 @@ cmake-build-*/
 *.exe
 *.o
 *.obj
-results/*.csv
-results/*.png
+results/
 __pycache__/
