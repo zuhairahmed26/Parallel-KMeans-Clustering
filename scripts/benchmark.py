@@ -29,6 +29,7 @@ WEAK_CONFIGS = [(1, 1), (2, 1), (2, 2), (4, 2)]
 OUTPUT_RE = {
     "runtime": re.compile(r"Runtime \(seconds\):\s*([0-9.eE+-]+)"),
     "iterations": re.compile(r"Iterations:\s*(\d+)"),
+    "converged": re.compile(r"Converged:\s*(yes|no)", re.IGNORECASE),
     "inertia": re.compile(r"Inertia \(SSE\):\s*([0-9.eE+-]+)"),
     "threads": re.compile(r"OpenMP threads per rank:\s*(\d+)"),
 }
@@ -76,7 +77,12 @@ def parse_model(output: str, serial: bool) -> dict:
     for key, pattern in OUTPUT_RE.items():
         match = pattern.search(output)
         if match:
-            model[key] = float(match.group(1)) if key in ("runtime", "inertia") else int(match.group(1))
+            if key in ("runtime", "inertia"):
+                model[key] = float(match.group(1))
+            elif key == "converged":
+                model[key] = match.group(1).lower() == "yes"
+            else:
+                model[key] = int(match.group(1))
     if serial:
         model["threads"] = 1
     centers = []
@@ -85,7 +91,7 @@ def parse_model(output: str, serial: bool) -> dict:
         if match:
             centers.extend(float(value.strip()) for value in match.group(1).split(","))
     model["centroids"] = centers
-    required = ("runtime", "iterations", "inertia")
+    required = ("runtime", "iterations", "converged", "inertia")
     missing = [key for key in required if key not in model]
     if missing or not centers:
         raise ValueError(f"could not parse program output fields: {', '.join(missing or ['centroids'])}")
@@ -128,6 +134,7 @@ def run_one(args: argparse.Namespace, experiment: str, mode: str, ranks: int,
         "tolerance_config": args.tolerance,
         "runtime_seconds": "",
         "iterations": "",
+        "converged": "",
         "inertia_sse": "",
         "observed_threads": "",
         "centroid_max_abs_diff": "",
@@ -155,6 +162,7 @@ def run_one(args: argparse.Namespace, experiment: str, mode: str, ranks: int,
         model = parse_model(output, mode == "serial")
         row["runtime_seconds"] = model["runtime"]
         row["iterations"] = model["iterations"]
+        row["converged"] = str(model["converged"]).lower()
         row["inertia_sse"] = model["inertia"]
         row["observed_threads"] = model["threads"]
         if model["threads"] != threads:
@@ -173,6 +181,7 @@ def run_one(args: argparse.Namespace, experiment: str, mode: str, ranks: int,
             sse_diff = abs(model["inertia"] - reference["inertia"])
             sse_limit = max(1e-8, args.sse_relative_tolerance * abs(reference["inertia"]))
             correct = (model["iterations"] == reference["iterations"] and
+                       model["converged"] == reference["converged"] and
                        centroid_diff <= args.centroid_tolerance and sse_diff <= sse_limit)
             row["centroid_max_abs_diff"] = centroid_diff
             row["sse_abs_diff"] = sse_diff
@@ -181,6 +190,7 @@ def run_one(args: argparse.Namespace, experiment: str, mode: str, ranks: int,
             if not correct:
                 row["status"] = "incorrect"
                 row["diagnostic"] = (f"iterations {model['iterations']} vs {reference['iterations']}; "
+                                     f"converged {model['converged']} vs {reference['converged']}; "
                                      f"centroid max diff {centroid_diff:g} (limit {args.centroid_tolerance:g}); "
                                      f"SSE diff {sse_diff:g} (limit {sse_limit:g})")
             elif mode == "serial":
@@ -216,6 +226,7 @@ def reproducibility_check(rows: list[dict], models: dict, args: argparse.Namespa
         for row in group[1:]:
             current = models[id(row)]
             if (current["iterations"] != first["iterations"] or
+                current["converged"] != first["converged"] or
                 abs(current["inertia"] - first["inertia"]) > max(1e-8, args.sse_relative_tolerance * abs(first["inertia"])) or
                 len(current["centroids"]) != len(first["centroids"]) or
                 max(abs(a-b) for a,b in zip(current["centroids"], first["centroids"])) > args.centroid_tolerance):
@@ -232,7 +243,7 @@ def reproducibility_check(rows: list[dict], models: dict, args: argparse.Namespa
 
 RAW_FIELDS = ["experiment", "repetition", "mode", "mpi_ranks", "threads_per_rank", "total_workers",
               "points", "dimensions", "clusters", "seed", "max_iterations_config", "tolerance_config",
-              "runtime_seconds", "wall_seconds_including_launcher", "iterations", "inertia_sse",
+              "runtime_seconds", "wall_seconds_including_launcher", "iterations", "converged", "inertia_sse",
               "observed_threads", "centroid_max_abs_diff", "sse_abs_diff", "correctness_pass",
               "reproducibility_pass", "serial_reference_seconds", "speedup", "efficiency",
               "exit_code", "status", "command", "diagnostic"]
@@ -270,6 +281,8 @@ def create_summary(rows: list[dict]) -> list[dict]:
                    (1.0 if key[1] == "serial" and valid_summary else ""))
         efficiency = (speedup / workers if speedup != "" and workers else "")
         iters = [int(r["iterations"]) for r in good]
+        convergence_states = {r["converged"] for r in good}
+        converged = (next(iter(convergence_states)) if len(convergence_states) == 1 else "mixed") if good else ""
         sses = [float(r["inertia_sse"]) for r in good]
         summary.append({
             "experiment": key[0], "mode": key[1], "mpi_ranks": key[2], "threads_per_rank": key[3],
@@ -279,6 +292,7 @@ def create_summary(rows: list[dict]) -> list[dict]:
             "mean_runtime_seconds": mean_runtime,
             "runtime_stddev_seconds": statistics.stdev(runtimes) if len(runtimes) > 1 else (0.0 if runtimes else ""),
             "mean_iterations": statistics.mean(iters) if iters else "",
+            "converged": converged,
             "mean_inertia_sse": statistics.mean(sses) if sses else "",
             "mean_speedup": speedup, "parallel_efficiency": efficiency,
         })
@@ -286,7 +300,7 @@ def create_summary(rows: list[dict]) -> list[dict]:
 
 
 def write_markdown_summary(path: Path, rows: list[dict]) -> None:
-    headers = ["Experiment", "Mode", "Ranks × threads", "Workers", "Points", "Mean time (s)",
+    headers = ["Experiment", "Mode", "Ranks × threads", "Workers", "Points", "Mean time (s)", "Converged",
                "Speedup", "Efficiency", "Iterations", "SSE", "Status", "Failed runs"]
     lines = ["# Phase 6 Benchmark Summary", "", "| " + " | ".join(headers) + " |",
              "|" + "|".join(["---"] * len(headers)) + "|"]
@@ -295,7 +309,7 @@ def write_markdown_summary(path: Path, rows: list[dict]) -> None:
         lines.append("| " + " | ".join([
             row["experiment"], row["mode"], f"{row['mpi_ranks']} × {row['threads_per_rank']}",
             str(row["total_workers"]), str(row["points"]), value("mean_runtime_seconds"),
-            value("mean_speedup"), value("parallel_efficiency"), value("mean_iterations"),
+            value("converged"), value("mean_speedup"), value("parallel_efficiency"), value("mean_iterations"),
             value("mean_inertia_sse"), row["status"], str(row["failed_runs"]),
         ]) + " |")
     lines.extend(["", "Speedup = mean serial runtime / mean parallel runtime for the same dataset. ",
@@ -305,7 +319,7 @@ def write_markdown_summary(path: Path, rows: list[dict]) -> None:
 
 SUMMARY_FIELDS = ["experiment", "mode", "mpi_ranks", "threads_per_rank", "total_workers", "points",
                   "dimensions", "clusters", "seed", "repetitions_requested", "successful_runs", "failed_runs",
-                  "status", "mean_runtime_seconds", "runtime_stddev_seconds", "mean_iterations",
+                  "status", "mean_runtime_seconds", "runtime_stddev_seconds", "mean_iterations", "converged",
                   "mean_inertia_sse", "mean_speedup", "parallel_efficiency"]
 
 

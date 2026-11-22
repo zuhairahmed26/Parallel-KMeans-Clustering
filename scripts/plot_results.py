@@ -61,6 +61,9 @@ def strong_lines(rows: list[dict], field: str, ylabel: str, title: str, filename
     ax.set_xlabel("Total workers (MPI ranks × OpenMP threads per rank)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
+    # Headroom keeps the legend and highest point clear in the efficiency plot,
+    # where measured efficiency can exceed 1 because of short-run noise.
+    ax.margins(y=0.20)
     ax.grid(True, alpha=0.25)
     ax.legend()
     fig.tight_layout()

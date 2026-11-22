@@ -16,6 +16,21 @@ K-Means groups points into `K` clusters. It repeatedly assigns each point to its
 - `src/main_mpi.cpp`: MPI startup, thread configuration, and hybrid result reporting.
 - `include/`: interfaces for the dataset, CLI and K-Means implementations.
 - `CMakeLists.txt`: builds serial independently and adds the MPI + OpenMP executable when those dependencies are found.
+- `scripts/benchmark.py` and `scripts/plot_results.py`: repeatable benchmark orchestration and CSV-based plots.
+- `docs/`: final technical report and demonstration/viva guide.
+- `results/`: locally generated CSV summaries and PNG plots; output files are ignored by Git and are not overwritten by a new benchmark run.
+
+```text
+parallel-kmeans/
+├── include/                 C++ interfaces
+├── src/                     serial, dataset, CLI, MPI/OpenMP implementations
+├── scripts/                 benchmark runner and Matplotlib plotter
+├── docs/                    technical report and demonstration/viva guide
+├── results/                 generated CSV and PNG outputs (local, ignored)
+├── output/pdf/               submission-ready PDF copies
+├── CMakeLists.txt
+└── README.md
+```
 
 Points and centroids use contiguous row-major `double` arrays. Empty clusters retain their previous centroid to avoid division by zero. Synthetic points are generated round-robin across known Gaussian centers.
 
@@ -44,6 +59,14 @@ Use the Windows checkout as the source and a Linux-home build directory so gener
 ```bash
 cmake -S "/mnt/c/Fast Nuces/Semester 7/PDC/PDC Project" -B "$HOME/parallel-kmeans-build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$HOME/parallel-kmeans-build" -j
+```
+
+For a serial-only build, configure a separate directory with `-DBUILD_MPI=OFF`:
+
+```bash
+cmake -S "/mnt/c/Fast Nuces/Semester 7/PDC/PDC Project" \
+  -B "$HOME/parallel-kmeans-serial" -DBUILD_MPI=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build "$HOME/parallel-kmeans-serial" --target kmeans -j
 ```
 
 The CMake MPI target links `MPI::MPI_CXX` and `OpenMP::OpenMP_CXX`. The serial target does not link OpenMP.
@@ -87,6 +110,23 @@ mpirun -n 4 "$HOME/parallel-kmeans-build/kmeans_mpi" --points 10003 --dimensions
 
 `kmeans` is the serial baseline. `kmeans_mpi --threads 1` is MPI-only computation. `kmeans_mpi --threads N` with `N > 1` uses both MPI and OpenMP.
 
+## Correctness validation
+
+The benchmark runner also acts as an integration correctness check. This compact command uses an uneven point count and tests serial, MPI-only, and all default hybrid configurations against matching seeded serial references:
+
+```bash
+PROJECT="/mnt/c/Fast Nuces/Semester 7/PDC/PDC Project"
+python3 -B "$PROJECT/scripts/benchmark.py" \
+  --serial-exe "$HOME/parallel-kmeans-build/kmeans" \
+  --mpi-exe "$HOME/parallel-kmeans-build/kmeans_mpi" \
+  --output-root /tmp/parallel-kmeans-check \
+  --strong-points 10003 --dimensions 8 --clusters 3 \
+  --max-iterations 100 --tolerance 0.001 --seed 42 \
+  --repetitions 1 --skip-weak
+```
+
+The runner compares convergence state, iteration count, final centroids (absolute tolerance `1e-5`) and SSE (relative tolerance `1e-6`, with a `1e-8` floor). A non-zero exit status means at least one run failed, was incorrect, or did not reproduce across repetitions. The full Phase 7 verification used the same runner with two repetitions and 100,000-point strong scaling; its raw CSV is retained in the results folder described below.
+
 ## How MPI and OpenMP work together
 
 - An **MPI rank** is a separate process with its own memory. The dataset is divided between ranks. `MPI_Scatterv` sends each rank its point slice, including uneven partitions. Rank 0 selects K-Means++ initial centroids and `MPI_Bcast` gives those same centroids to all ranks.
@@ -110,7 +150,7 @@ The reported MPI runtime starts after initial centroids and point distribution. 
 - MPI uses classic `int` element counts/displacements for `MPI_Scatterv`; configurations whose point or centroid element counts exceed `INT_MAX` are rejected before allocation/distribution.
 - Each rank's thread-private sum storage is proportional to `threads × clusters × dimensions`.
 - Assignments remain local to each rank in the normal CLI run; the program does not gather or write all labels. A correctness harness can gather them for comparisons.
-- The program currently reports runtime, iterations, MPI ranks and OpenMP threads per rank. Total worker count can be calculated as ranks × threads. Speedup, efficiency, CSV automation, plots and strong/weak scaling are intentionally deferred to Phase 6.
+- The program reports runtime, iterations, convergence, MPI ranks and OpenMP threads per rank. The benchmark runner records total workers, speedup, efficiency, SSE and convergence status in CSV.
 - If a rank encounters an unexpected exception while MPI work is active, the program reports it and calls `MPI_Abort` so other ranks do not wait forever in a collective. Normal success and coordinated input-error paths finalize MPI normally.
 
 ## Troubleshooting
@@ -122,7 +162,7 @@ The reported MPI runtime starts after initial centroids and point distribution. 
 
 ## Phase 6 benchmarking
 
-Benchmark automation is separate from the K-Means executables. The runner uses Python's standard library; plotting requires Matplotlib (`scripts/requirements.txt`). In Ubuntu, install Matplotlib with `sudo apt install python3-matplotlib` if it is not present.
+Benchmark automation is separate from the K-Means executables. The runner uses Python's standard library. Plotting requires Matplotlib (`scripts/requirements.txt`) and can run in a project-local virtual environment. If Ubuntu's `python3 -m venv` reports that `ensurepip` is missing, the matching `python3-venv` package must first be made available by the system administrator; install Matplotlib only inside the virtual environment.
 
 Build the serial and hybrid executables as shown above, then run from Ubuntu:
 
@@ -140,8 +180,8 @@ Point counts, dimensions, clusters, seed, max iterations, tolerance, repetitions
 
 Each invocation creates a timestamped folder under the output root with:
 
-- `raw_results.csv`: one row for every attempt, including command, return code, diagnostic, correctness and reproducibility status. Failed, incorrect, unvalidated or non-reproducible runs remain visible and make the script exit non-zero.
-- `summary.csv` and `summary.md`: average runtime, runtime standard deviation, average iterations/SSE, success/failure counts, speedup and efficiency per configuration. Configurations with any failed or invalid repetition have no summary speedup/efficiency.
+- `raw_results.csv`: one row for every attempt, including command, return code, diagnostic, correctness, reproducibility and convergence status. Failed, incorrect, unvalidated or non-reproducible runs remain visible and make the script exit non-zero.
+- `summary.csv` and `summary.md`: average runtime, runtime standard deviation, average iterations/SSE, convergence state, success/failure counts, speedup and efficiency per configuration. Configurations with any failed or invalid repetition have no summary speedup/efficiency.
 - Plot files generated by the plotting script below.
 
 Run plots for a completed benchmark directory:
@@ -160,8 +200,57 @@ Speedup is `mean serial runtime / mean parallel runtime` for the same dataset pa
 
 Both executables report algorithm runtime, not Python/MPI launcher wall time. Serial timing includes assignment/update iterations and final assignment/inertia; it excludes synthetic data generation and K-Means++ initialization. MPI timing covers the same iterative and final-inertia work, plus thread-buffer merging and MPI reductions; it reports the slowest rank. It starts after data and centroids have been distributed, excluding dataset generation and initial distribution. `raw_results.csv` also records launcher wall time for context, but speedup uses application-reported runtime.
 
-Before accepting a parallel run, the runner requires an exact iteration-count match, maximum centroid difference ≤ `1e-5`, and SSE difference ≤ `max(1e-8, 1e-6 × |serial SSE|)`. Repeated runs use the same seed and are checked for model reproducibility; runtime is expected to vary. No speedup or scaling claim should be made until the generated results support it. Larger N can require substantial time and memory because rank 0 generates and holds the full dataset.
+Before accepting a parallel run, the runner requires matching iteration count and convergence state, maximum centroid difference ≤ `1e-5`, and SSE difference ≤ `max(1e-8, 1e-6 × |serial SSE|)`. Repeated runs use the same seed and are checked for model reproducibility; runtime is expected to vary. A matching run that reached its iteration cap is recorded as `converged=false`, so a result can be correct relative to serial while still being unsuitable for a converged weak-scaling claim. Larger N can require substantial time and memory because rank 0 generates and holds the full dataset.
+
+### Local plotting environment
+
+From the project root in Ubuntu, create a local environment and install the plotting requirement there:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r scripts/requirements.txt
+```
+
+The `.venv/` directory is ignored by Git. If virtual-environment support is missing from the Ubuntu Python installation, resolve that prerequisite before creating the environment. The Python package install itself is confined to `.venv`.
+
+### Measured results
+
+The following are measured application runtimes from Ubuntu on WSL2, using the actual program output. Strong scaling used N=100,000, D=32, K=5, seed 42, tolerance 0.001, a 500-iteration cap, and two repetitions. The serial mean was 0.036871 seconds (2 iterations, converged, SSE 3,202,258.706455).
+
+| Mode | MPI ranks × threads/rank | Total workers | Mean runtime (s) | Speedup | Efficiency |
+|---|---:|---:|---:|---:|---:|
+| MPI-only | 1 × 1 | 1 | 0.031660 | 1.165 | 1.165 |
+| MPI-only | 2 × 1 | 2 | 0.016560 | 2.226 | 1.113 |
+| MPI-only | 4 × 1 | 4 | 0.013437 | 2.744 | 0.686 |
+| Hybrid | 1 × 2 | 2 | 0.023412 | 1.575 | 0.787 |
+| Hybrid | 1 × 4 | 4 | 0.026030 | 1.416 | 0.354 |
+| Hybrid | 2 × 2 | 4 | 0.016420 | 2.246 | 0.561 |
+| Hybrid | 2 × 4 | 8 | 0.035668 | 1.034 | 0.129 |
+| Hybrid | 4 × 2 | 8 | 0.019483 | 1.892 | 0.237 |
+| Hybrid | 4 × 4 | 16 | 0.064344 | 0.573 | 0.036 |
+
+The 16-worker configuration was slower than serial. The WSL environment reported 8 available logical processors (`nproc`), so that configuration oversubscribed the reported capacity. The implementation also creates and merges per-thread accumulator buffers and performs global reductions each iteration; the benchmark has no profiling data that separates these costs.
+
+The revised weak-scaling run kept 20,000 points per worker, D=32, K=5, seed 42 and tolerance 0.001. It raised the maximum to 500 iterations; the 160,000-point, 8-worker case converged in 172 iterations. All configurations converged and matched the serial baseline in two repetitions, but iteration counts ranged from 2 to 172, so the runtime trend is not a clean fixed-work-per-worker comparison.
+
+| MPI ranks × threads/rank | Workers | Points | Mean runtime (s) | Iterations | Converged | SSE |
+|---:|---:|---:|---:|---:|:---:|---:|
+| 1 × 1 (MPI-only) | 1 | 20,000 | 0.006269 | 2 | yes | 640,245.213463 |
+| 2 × 1 (MPI-only) | 2 | 40,000 | 0.007226 | 2 | yes | 1,281,773.957666 |
+| 2 × 2 (hybrid) | 4 | 80,000 | 0.023430 | 3 | yes | 2,561,947.843404 |
+| 4 × 2 (hybrid) | 8 | 160,000 | 0.763506 | 172 | yes | 23,711,673.702115 |
+
+All plots, CSV files and the full analysis are in the timestamped `results/phase6_20261123_020832_500940/` folder. The first Phase 6 run is preserved in `results/phase6_20261123_015106_878239/`; its 8-worker weak case reached the original 100-iteration cap and is not used as the converged weak-scaling result.
+
+## Final submission documents
+
+- [Technical report](docs/technical_report.md)
+- [Demonstration and viva guide](docs/demonstration_viva_guide.md)
+- PDF copies are created under `output/pdf/` for printing and submission.
+
+The report includes F1–F7 implementation evidence, the measured tables and linked PNG figures. The viva guide contains the full workflow, command sequence, performance explanations and more than 25 questions with answers.
 
 ## Roadmap
 
-Phase 6 provides measurement and scaling evaluation. No algorithm changes are made for benchmark results; further project phases should be agreed after reviewing the actual measurements.
+Serial K-Means, MPI distribution/reduction, OpenMP assignment, benchmarking and report preparation are complete. Future improvements include stronger weak-scaling controls, larger sustained workloads, richer memory/CPU profiling and optionally gathering final assignments for external inspection. These are not part of the current implementation.

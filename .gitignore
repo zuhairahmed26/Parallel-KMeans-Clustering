@@ -5,3 +5,4 @@ cmake-build-*/
 *.obj
 results/
 __pycache__/
+.venv/
